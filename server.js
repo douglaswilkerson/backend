@@ -74,6 +74,11 @@ async function initDb() {
 }
 initDb().catch(err => console.error('DB init error:', err));
 
+// ── Root route – redirect to frontend ──
+app.get('/', (req, res) => {
+  res.redirect('https://link-share-frontend.onrender.com');
+});
+
 // ── API: Get latest 10 links ──
 app.get('/api/links', async (req, res) => {
   try {
