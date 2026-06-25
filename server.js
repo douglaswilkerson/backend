@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const cookieParser = require('cookie-parser');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,7 +44,7 @@ async function isIpBlocked(ip) {
   }
 }
 
-// ── Initialize tables ──
+// ── Initialize tables (with edit_token column added) ──
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS links (
@@ -67,9 +68,14 @@ async function initDb() {
       reward_description TEXT NOT NULL,
       click_count INTEGER DEFAULT 0,
       created_at BIGINT NOT NULL,
-      last_posted_at BIGINT
+      last_posted_at BIGINT,
+      edit_token TEXT UNIQUE
     )
   `);
+  // Ensure edit_token column exists (in case table was created earlier)
+  await pool.query(`
+    ALTER TABLE referrals ADD COLUMN IF NOT EXISTS edit_token TEXT UNIQUE
+  `).catch(() => {});
   console.log('✅ Database tables ready');
 }
 initDb().catch(err => console.error('DB init error:', err));
@@ -163,12 +169,13 @@ app.post('/api/referrals', async (req, res) => {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const slug = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
   const createdAt = Date.now();
+  const editToken = crypto.randomBytes(16).toString('hex');
 
   try {
     await pool.query(
-      `INSERT INTO referrals (id, slug, reward_url, reward_description, created_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [id, slug, rewardUrl, rewardDescription, createdAt]
+      `INSERT INTO referrals (id, slug, reward_url, reward_description, created_at, edit_token)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, slug, rewardUrl, rewardDescription, createdAt, editToken]
     );
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json({
@@ -179,7 +186,9 @@ app.post('/api/referrals', async (req, res) => {
         rewardUrl,
         rewardDescription,
         referralLink: `${baseUrl}/ref/${slug}`,
-        clickCount: 0
+        clickCount: 0,
+        editToken,
+        editLink: `${req.protocol}://link-share-frontend.onrender.com/?edit=${editToken}`
       }
     });
   } catch (err) {
@@ -289,6 +298,53 @@ app.post('/api/ref-click', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ── REFERRAL: Load referral data via edit token (GET) ──
+app.get('/edit/:token', async (req, res) => {
+  const { token } = req.params;
+  try {
+    const result = await pool.query(
+      'SELECT id, reward_url, reward_description, slug FROM referrals WHERE edit_token = $1',
+      [token]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Invalid edit token' });
+    }
+    res.json({ success: true, referral: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── REFERRAL: Update referral data via edit token (PUT) ──
+app.put('/api/referrals/:token', async (req, res) => {
+  const { token } = req.params;
+  const { rewardUrl, rewardDescription } = req.body;
+  if (!rewardUrl || !rewardDescription) {
+    return res.status(400).json({ error: 'Both fields are required' });
+  }
+  try { new URL(rewardUrl); } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE referrals 
+       SET reward_url = $1, reward_description = $2 
+       WHERE edit_token = $3 
+       RETURNING id, slug, reward_url, reward_description`,
+      [rewardUrl, rewardDescription, token]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Invalid edit token' });
+    }
+    res.json({ success: true, referral: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
