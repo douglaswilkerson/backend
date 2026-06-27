@@ -35,10 +35,16 @@ async function isIpBlocked(ip) {
   if (result.rows.length === 0) return null;
   const row = result.rows[0];
   const now = Date.now();
-  const expiry = row.blocked_at + 24 * 60 * 60 * 1000;
+  const expiry = row.blocked_at + 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  
   if (now < expiry) {
-    return { blocked: true, remainingMs: expiry - now };
+    let remainingMs = expiry - now;
+    // ── Safety cap: never return more than 24 hours ──
+    const maxMs = 24 * 60 * 60 * 1000;
+    if (remainingMs > maxMs) remainingMs = maxMs;
+    return { blocked: true, remainingMs };
   } else {
+    // Block expired – clean up
     await pool.query('DELETE FROM blocks WHERE ip = $1', [ip]);
     return null;
   }
